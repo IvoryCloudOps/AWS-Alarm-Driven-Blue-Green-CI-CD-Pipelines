@@ -1,6 +1,13 @@
-name: Application Build and Push
+name: Application CI
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - "app/**"
+      - ".github/workflows/application-deploy.yml"
+
   workflow_dispatch:
 
 permissions:
@@ -12,12 +19,26 @@ env:
   ECR_REPOSITORY: ivorycloud-delivery
 
 jobs:
-  build-and-push:
+  build-test-scan-push:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install application dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r app/requirements.txt
+
+      - name: Validate Python application
+        run: |
+          python -m py_compile app/app.py
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
@@ -29,8 +50,7 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push Docker image
-        id: build-image
+      - name: Build Docker image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
@@ -39,10 +59,86 @@ jobs:
             -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
             ./app
 
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: "CRITICAL,HIGH"
+
+      - name: Push immutable image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
           docker push \
             $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
 
-          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+      - name: Publish image URI
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          echo "IMAGE_URI=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_ENV"
+          echo "Published image:"
+          echo "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
-      - name: Show published image
-        run: echo "${{ steps.build-image.outputs.image }}"
+
+                - name: Download current ECS task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ivorycloud-delivery \
+            --query taskDefinition \
+            > current-task-definition.json
+
+      - name: Create new task definition revision
+        env:
+          IMAGE_URI: ${{ env.IMAGE_URI }}
+        run: |
+          jq \
+            --arg IMAGE "$IMAGE_URI" \
+            '
+            del(
+              .taskDefinitionArn,
+              .revision,
+              .status,
+              .requiresAttributes,
+              .compatibilities,
+              .registeredAt,
+              .registeredBy
+            )
+            |
+            .containerDefinitions[0].image = $IMAGE
+            ' \
+            current-task-definition.json \
+            > new-task-definition.json
+
+      - name: Register new ECS task definition
+        id: register-task
+        run: |
+          TASK_DEFINITION_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://new-task-definition.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          echo "task_definition_arn=$TASK_DEFINITION_ARN" >> "$GITHUB_OUTPUT"
+
+          echo "Registered:"
+          echo "$TASK_DEFINITION_ARN"
+
+      - name: Deploy new revision to ECS
+        run: |
+          aws ecs update-service \
+            --cluster blue-green-delivery-cluster \
+            --service ivorycloud-delivery-service \
+            --task-definition "${{ steps.register-task.outputs.task_definition_arn }}"
+
+      - name: Show deployment status
+        run: |
+          aws ecs describe-services \
+            --cluster blue-green-delivery-cluster \
+            --services ivorycloud-delivery-service \
+            --query 'services[0].deployments[*].{Status:status,TaskDefinition:taskDefinition,Running:runningCount,Desired:desiredCount}' \
+            --output table
