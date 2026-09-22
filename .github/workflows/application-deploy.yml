@@ -86,7 +86,7 @@ jobs:
           echo "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
 
-                - name: Download current ECS task definition
+      - name: Download current ECS task definition
         run: |
           aws ecs describe-task-definition \
             --task-definition ivorycloud-delivery \
