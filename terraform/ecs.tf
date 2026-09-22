@@ -79,6 +79,15 @@ resource "aws_ecs_service" "application_service" {
 
   health_check_grace_period_seconds = 60
 
+  deployment_controller {
+    type = "ECS"
+  }
+
+  deployment_configuration {
+    strategy             = "BLUE_GREEN"
+    bake_time_in_minutes = 5
+  }
+
   network_configuration {
     subnets = [
       aws_subnet.private_a.id,
@@ -96,11 +105,18 @@ resource "aws_ecs_service" "application_service" {
     target_group_arn = aws_lb_target_group.blue_tg.arn
     container_name   = "ivorycloud-delivery"
     container_port   = 8080
+
+    advanced_configuration {
+      alternate_target_group_arn = aws_lb_target_group.green_tg.arn
+      production_listener_rule   = aws_lb_listener_rule.production_rule.arn
+      role_arn                   = aws_iam_role.ecs_infrastructure_role.arn
+    }
   }
 
   depends_on = [
     aws_lb_listener_rule.production_rule,
-    aws_iam_role_policy_attachment.ecs_execution_policy
+    aws_iam_role_policy_attachment.ecs_execution_policy,
+    aws_iam_role_policy.ecs_infrastructure_policy
   ]
 
   tags = {
