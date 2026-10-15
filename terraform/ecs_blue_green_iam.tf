@@ -47,3 +47,7 @@ resource "aws_iam_role_policy" "ecs_infrastructure_policy" {
     ]
   })
 }
+resource "aws_iam_role_policy_attachment" "ecs_infrastructure_lb_policy" {
+  role       = aws_iam_role.ecs_infrastructure_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonECSInfrastructureRolePolicyForLoadBalancers"
+}
