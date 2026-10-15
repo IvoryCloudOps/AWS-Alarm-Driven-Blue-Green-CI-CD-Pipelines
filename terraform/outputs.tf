@@ -57,3 +57,12 @@ output "jenkins_instance_profile_name" {
   description = "Attach this instance profile to the Jenkins EC2 instance"
   value       = aws_iam_instance_profile.jenkins.name
 }
+
+output "jenkins_url" {
+  description = "Jenkins UI URL"
+  value       = "http://${aws_instance.jenkins.public_ip}:8080"
+}
+
+output "jenkins_instance_id" {
+  value = aws_instance.jenkins.id
+}

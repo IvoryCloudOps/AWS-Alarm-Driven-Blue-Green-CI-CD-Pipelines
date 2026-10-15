@@ -10,3 +10,14 @@ variable "bootstrap_image_tag" {
   type        = string
   default     = "bootstrap"
 }
+
+variable "jenkins_allowed_cidr" {
+  description = "CIDR allowed to reach the Jenkins UI on port 8080 (e.g. your public IP as x.x.x.x/32)"
+  type        = string
+}
+
+variable "jenkins_instance_type" {
+  description = "EC2 instance type for the Jenkins server"
+  type        = string
+  default     = "t3.medium"
+}

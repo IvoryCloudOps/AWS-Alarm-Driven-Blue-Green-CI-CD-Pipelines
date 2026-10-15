@@ -96,4 +96,9 @@ resource "aws_lb_listener_rule" "production_rule" {
       values = ["/*"]
     }
   }
+
+  # ECS blue/green deployments swap the target group on this rule.
+  lifecycle {
+    ignore_changes = [action]
+  }
 }
