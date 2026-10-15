@@ -1,12 +1,3 @@
-data "aws_ecr_repository" "application_repo" {
-  name = "ivorycloud-delivery"
-}
-
-data "aws_ecr_image" "application_image" {
-  repository_name = data.aws_ecr_repository.application_repo.name
-  most_recent     = true
-}
-
 resource "aws_ecs_cluster" "delivery_cluster" {
   name = "blue-green-delivery-cluster"
 
@@ -41,7 +32,7 @@ resource "aws_ecs_task_definition" "application" {
       name      = "ivorycloud-delivery"
       essential = true
 
-      image = "${data.aws_ecr_repository.application_repo.repository_url}@${data.aws_ecr_image.application_image.image_digest}"
+      image = "${aws_ecr_repository.app.repository_url}:${var.bootstrap_image_tag}"
 
       portMappings = [
         {
@@ -118,6 +109,11 @@ resource "aws_ecs_service" "application_service" {
     aws_iam_role_policy_attachment.ecs_execution_policy,
     aws_iam_role_policy.ecs_infrastructure_policy
   ]
+
+  # The Jenkins pipeline registers new task definition revisions and deploys them.
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
 
   tags = {
     Project   = "AWS Blue Green Container Delivery Platform"

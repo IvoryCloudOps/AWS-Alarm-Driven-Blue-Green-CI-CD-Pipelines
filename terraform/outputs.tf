@@ -48,3 +48,12 @@ output "ecs_cluster_name" {
 output "ecs_service_name" {
   value = aws_ecs_service.application_service.name
 }
+output "jenkins_deploy_policy_arn" {
+  description = "Attach this policy to the IAM role or user Jenkins uses"
+  value       = aws_iam_policy.jenkins_deploy.arn
+}
+
+output "jenkins_instance_profile_name" {
+  description = "Attach this instance profile to the Jenkins EC2 instance"
+  value       = aws_iam_instance_profile.jenkins.name
+}
