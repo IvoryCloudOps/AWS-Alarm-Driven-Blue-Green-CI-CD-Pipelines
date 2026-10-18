@@ -69,7 +69,10 @@ during the bake until the 5XX alarm makes ECS fail back to blue.'''
 
         stage('Validate Application') {
             steps {
+                // Jenkins exports build parameters as environment variables. The drill
+                // only applies to the deployed task definition, never to CI.
                 sh '''
+                    unset FAULT_INJECTION
                     python3 -m venv .venv
                     . .venv/bin/activate
                     pip install --upgrade pip
