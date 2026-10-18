@@ -21,6 +21,14 @@ def notifySns(String subject, String message) {
 pipeline {
     agent any
 
+    parameters {
+        booleanParam(
+            name: 'SIMULATE_BAD_RELEASE',
+            defaultValue: false,
+            description: 'Deploy with /health returning 500 to rehearse alarm, rollback, and notifications.'
+        )
+    }
+
     options {
         timestamps()
         disableConcurrentBuilds()
@@ -124,13 +132,20 @@ EOF
 
                     env.NEW_TASK_DEF = sh(
                         script: '''
-                            aws ecs describe-task-definition --task-definition "$TASK_FAMILY" \
+                            aws ecs describe-task-definition --task-definition "$PREVIOUS_TASK_DEF" \
                                 --query taskDefinition > current-task-definition.json
 
-                            jq --arg IMAGE "$IMAGE_URI" '
+                            # SIMULATE_UNHEALTHY is always cleared, and only set for a bad-release drill.
+                            jq --arg IMAGE "$IMAGE_URI" --arg BAD "${SIMULATE_BAD_RELEASE:-false}" '
                                 del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
                                     .compatibilities, .registeredAt, .registeredBy)
                                 | .containerDefinitions[0].image = $IMAGE
+                                | .containerDefinitions[0].environment =
+                                    ([(.containerDefinitions[0].environment // [])[]
+                                      | select(.name != "SIMULATE_UNHEALTHY")]
+                                     + (if $BAD == "true"
+                                        then [{name: "SIMULATE_UNHEALTHY", value: "true"}]
+                                        else [] end))
                             ' current-task-definition.json > new-task-definition.json
 
                             aws ecs register-task-definition \
@@ -227,14 +242,38 @@ Previous:        ${env.PREVIOUS_TASK_DEF}"""
                 echo "Pipeline failed."
                 def rollback = 'not needed (failed before deploy)'
                 if (env.DEPLOY_STARTED == 'true' && env.PREVIOUS_TASK_DEF) {
-                    echo "Rolling back to ${env.PREVIOUS_TASK_DEF}"
-                    sh '''
-                        aws ecs update-service \
-                            --cluster "$ECS_CLUSTER" \
-                            --service "$ECS_SERVICE" \
-                            --task-definition "$PREVIOUS_TASK_DEF" >/dev/null
-                    '''
-                    rollback = "rolled back to ${env.PREVIOUS_TASK_DEF}"
+                    def current = sh(
+                        script: '''aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+                                   --query 'services[0].taskDefinition' --output text''',
+                        returnStdout: true
+                    ).trim()
+
+                    if (current == env.PREVIOUS_TASK_DEF) {
+                        // The ECS alarm or circuit breaker already rolled the service back.
+                        echo "ECS already rolled back to ${env.PREVIOUS_TASK_DEF}"
+                        rollback = "ECS automatic rollback to ${env.PREVIOUS_TASK_DEF}"
+                    } else {
+                        echo "Rolling back to ${env.PREVIOUS_TASK_DEF}"
+                        sh '''
+                            aws ecs update-service \
+                                --cluster "$ECS_CLUSTER" \
+                                --service "$ECS_SERVICE" \
+                                --task-definition "$PREVIOUS_TASK_DEF" >/dev/null
+                        '''
+                        rollback = "Jenkins rollback to ${env.PREVIOUS_TASK_DEF}"
+                    }
+
+                    def healthy = sh(
+                        script: '''
+                            aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+                            ALB_DNS=$(aws elbv2 describe-load-balancers --names "$ALB_NAME" \
+                                --query 'LoadBalancers[0].DNSName' --output text)
+                            curl --fail --silent --show-error --retry 5 --retry-delay 6 --retry-all-errors \
+                                "http://$ALB_DNS/health"
+                        ''',
+                        returnStatus: true
+                    ) == 0
+                    rollback += healthy ? '; service stable and healthy again' : '; WARNING: service not confirmed healthy'
                 }
                 notifySns(
                     "FAILURE: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
@@ -243,6 +282,7 @@ Previous:        ${env.PREVIOUS_TASK_DEF}"""
 Job:       ${env.JOB_NAME} #${env.BUILD_NUMBER}
 Build URL: ${env.BUILD_URL ?: 'n/a'}
 Commit:    ${env.IMAGE_TAG ?: 'n/a'}
+Simulated: ${params.SIMULATE_BAD_RELEASE ? 'yes (bad-release drill)' : 'no'}
 Rollback:  ${rollback}"""
                 )
             }

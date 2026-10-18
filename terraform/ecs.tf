@@ -74,7 +74,9 @@ resource "aws_ecs_service" "application_service" {
   desired_count = 1
   launch_type   = "FARGATE"
 
-  health_check_grace_period_seconds = 60
+  # Long enough for an unhealthy target to stay registered for the two one-minute
+  # periods the unhealthy-targets alarm needs before ECS replaces the task.
+  health_check_grace_period_seconds = 240
 
   deployment_controller {
     type = "ECS"
@@ -83,6 +85,18 @@ resource "aws_ecs_service" "application_service" {
   deployment_configuration {
     strategy             = "BLUE_GREEN"
     bake_time_in_minutes = 5
+  }
+
+  # Roll back automatically when a new revision's targets go unhealthy.
+  alarms {
+    alarm_names = [aws_cloudwatch_metric_alarm.alb_unhealthy_targets.alarm_name]
+    enable      = true
+    rollback    = true
+  }
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
   }
 
   network_configuration {

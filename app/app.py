@@ -1,6 +1,11 @@
+import os
+
 from flask import Flask, jsonify
 
 app = Flask(__name__)
+
+# Set by the Jenkins SIMULATE_BAD_RELEASE parameter to rehearse a failed deployment.
+SIMULATE_UNHEALTHY = os.environ.get("SIMULATE_UNHEALTHY") == "true"
 
 
 @app.route("/")
@@ -14,6 +19,9 @@ def home():
 
 @app.route("/health")
 def health():
+    if SIMULATE_UNHEALTHY:
+        return jsonify(status="unhealthy", version="1.0.0"), 500
+
     return jsonify(
         status="healthy",
         version="1.0.0"
