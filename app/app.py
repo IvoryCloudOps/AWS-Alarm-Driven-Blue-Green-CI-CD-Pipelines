@@ -4,12 +4,17 @@ from flask import Flask, jsonify
 
 app = Flask(__name__)
 
-# Set by the Jenkins SIMULATE_BAD_RELEASE parameter to rehearse a failed deployment.
-SIMULATE_UNHEALTHY = os.environ.get("SIMULATE_UNHEALTHY") == "true"
+# Set by the Jenkins FAULT_INJECTION parameter to rehearse failed deployments:
+#   unhealthy   - /health returns 500, so green never receives production traffic
+#   http-errors - /health passes, but / returns 500 once traffic shifts to green
+FAULT_INJECTION = os.environ.get("FAULT_INJECTION", "none")
 
 
 @app.route("/")
 def home():
+    if FAULT_INJECTION == "http-errors":
+        return "Simulated application error\n", 500
+
     return """
     IvoryCloud Delivery Platform
     Application Version: v1.0.0
@@ -19,7 +24,7 @@ def home():
 
 @app.route("/health")
 def health():
-    if SIMULATE_UNHEALTHY:
+    if FAULT_INJECTION == "unhealthy":
         return jsonify(status="unhealthy", version="1.0.0"), 500
 
     return jsonify(

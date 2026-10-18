@@ -29,6 +29,8 @@ resource "aws_iam_policy" "jenkins_deploy" {
         Effect = "Allow"
         Action = [
           "ecs:DescribeServices",
+          "ecs:ListServiceDeployments",
+          "ecs:DescribeServiceDeployments",
           "ecs:DescribeTaskDefinition",
           "ecs:RegisterTaskDefinition",
           "ecs:UpdateService"

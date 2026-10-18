@@ -22,10 +22,12 @@ pipeline {
     agent any
 
     parameters {
-        booleanParam(
-            name: 'SIMULATE_BAD_RELEASE',
-            defaultValue: false,
-            description: 'Deploy with /health returning 500 to rehearse alarm, rollback, and notifications.'
+        choice(
+            name: 'FAULT_INJECTION',
+            choices: ['none', 'unhealthy', 'http-errors'],
+            description: '''Rehearse a failed deployment. unhealthy: /health returns 500, so green never
+gets production traffic. http-errors: /health passes and traffic shifts to green, then / returns 500
+during the bake until the 5XX alarm makes ECS fail back to blue.'''
         )
     }
 
@@ -135,16 +137,16 @@ EOF
                             aws ecs describe-task-definition --task-definition "$PREVIOUS_TASK_DEF" \
                                 --query taskDefinition > current-task-definition.json
 
-                            # SIMULATE_UNHEALTHY is always cleared, and only set for a bad-release drill.
-                            jq --arg IMAGE "$IMAGE_URI" --arg BAD "${SIMULATE_BAD_RELEASE:-false}" '
+                            # FAULT_INJECTION is always cleared, and only set for a failed-deployment drill.
+                            jq --arg IMAGE "$IMAGE_URI" --arg FAULT "${FAULT_INJECTION:-none}" '
                                 del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
                                     .compatibilities, .registeredAt, .registeredBy)
                                 | .containerDefinitions[0].image = $IMAGE
                                 | .containerDefinitions[0].environment =
                                     ([(.containerDefinitions[0].environment // [])[]
-                                      | select(.name != "SIMULATE_UNHEALTHY")]
-                                     + (if $BAD == "true"
-                                        then [{name: "SIMULATE_UNHEALTHY", value: "true"}]
+                                      | select(.name != "FAULT_INJECTION" and .name != "SIMULATE_UNHEALTHY")]
+                                     + (if $FAULT != "none"
+                                        then [{name: "FAULT_INJECTION", value: $FAULT}]
                                         else [] end))
                             ' current-task-definition.json > new-task-definition.json
 
@@ -201,7 +203,10 @@ EOF
         stage('Bake Period') {
             steps {
                 // ECS keeps the deployment IN_PROGRESS through the bake time configured on the
-                // service, then reports COMPLETED. Fail fast on FAILED or ALB health errors.
+                // service, with blue still running. The service's CloudWatch alarms (unhealthy
+                // targets, target 5XX) decide rollback: ECS shifts traffic back to blue and marks
+                // the rollout FAILED. Jenkins only probes and reports, so it never races ECS.
+                // The probes also give the 5XX alarm data when there is no real traffic.
                 sh '''
                     ALB_DNS=$(cat alb_dns.txt)
                     END=$(( $(date +%s) + BAKE_TIMEOUT_MIN * 60 ))
@@ -209,12 +214,15 @@ EOF
                         STATE=$(aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
                             --query "services[0].deployments[?taskDefinition=='$NEW_TASK_DEF'] | [0].rolloutState" \
                             --output text)
-                        echo "rollout=$STATE"
-                        curl --fail --silent --show-error "http://$ALB_DNS/health" >/dev/null \
-                            || { echo "ALB health check failed during bake"; exit 1; }
+                        CODES=""
+                        for i in 1 2 3 4 5; do
+                            CODES="$CODES $(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://$ALB_DNS/")"
+                        done
+                        HEALTH=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://$ALB_DNS/health")
+                        echo "rollout=$STATE /:$CODES /health: $HEALTH"
                         [ "$STATE" = "COMPLETED" ] && { echo "Bake complete"; exit 0; }
-                        [ "$STATE" = "FAILED" ] && { echo "Rollout failed"; exit 1; }
-                        sleep 30
+                        [ "$STATE" = "FAILED" ] && { echo "Rollout failed: ECS rolled back to blue"; exit 1; }
+                        sleep 15
                     done
                     echo "Bake period timed out"; exit 1
                 '''
@@ -251,7 +259,22 @@ Previous:        ${env.PREVIOUS_TASK_DEF}"""
                     if (current == env.PREVIOUS_TASK_DEF) {
                         // The ECS alarm or circuit breaker already rolled the service back.
                         echo "ECS already rolled back to ${env.PREVIOUS_TASK_DEF}"
+                        def reason = sh(
+                            script: '''
+                                ARN=$(aws ecs list-service-deployments --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+                                    --query "serviceDeployments[?starts_with(status, 'ROLLBACK')] | [0].serviceDeploymentArn" \
+                                    --output text) \
+                                && aws ecs describe-service-deployments --service-deployment-arns "$ARN" \
+                                    --query "serviceDeployments[0].[statusReason, join(', ', alarms.triggeredAlarmNames || ['none'])]" \
+                                    --output text | awk -F '\\t' '{ print $1 " Triggered alarms: " $2 }' \
+                                || true
+                            ''',
+                            returnStdout: true
+                        ).trim()
                         rollback = "ECS automatic rollback to ${env.PREVIOUS_TASK_DEF}"
+                        if (reason) {
+                            rollback += " (${reason})"
+                        }
                     } else {
                         echo "Rolling back to ${env.PREVIOUS_TASK_DEF}"
                         sh '''
@@ -268,8 +291,10 @@ Previous:        ${env.PREVIOUS_TASK_DEF}"""
                             aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
                             ALB_DNS=$(aws elbv2 describe-load-balancers --names "$ALB_NAME" \
                                 --query 'LoadBalancers[0].DNSName' --output text)
-                            curl --fail --silent --show-error --retry 5 --retry-delay 6 --retry-all-errors \
-                                "http://$ALB_DNS/health"
+                            for path in /health /; do
+                                curl --fail --silent --show-error --retry 5 --retry-delay 6 --retry-all-errors \
+                                    -o /dev/null "http://$ALB_DNS$path" || exit 1
+                            done
                         ''',
                         returnStatus: true
                     ) == 0
@@ -282,7 +307,7 @@ Previous:        ${env.PREVIOUS_TASK_DEF}"""
 Job:       ${env.JOB_NAME} #${env.BUILD_NUMBER}
 Build URL: ${env.BUILD_URL ?: 'n/a'}
 Commit:    ${env.IMAGE_TAG ?: 'n/a'}
-Simulated: ${params.SIMULATE_BAD_RELEASE ? 'yes (bad-release drill)' : 'no'}
+Simulated: ${(params.FAULT_INJECTION ?: 'none') == 'none' ? 'no' : "yes (FAULT_INJECTION=${params.FAULT_INJECTION})"}
 Rollback:  ${rollback}"""
                 )
             }

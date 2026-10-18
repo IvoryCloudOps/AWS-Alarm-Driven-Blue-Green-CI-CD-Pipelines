@@ -87,11 +87,16 @@ resource "aws_ecs_service" "application_service" {
     bake_time_in_minutes = 5
   }
 
-  # Roll back automatically when a new revision's targets go unhealthy.
+  # ECS watches these alarms for the whole deployment, including the bake window while
+  # blue is still running. If either fires, ECS shifts traffic back to blue and fails
+  # the green deployment.
   alarms {
-    alarm_names = [aws_cloudwatch_metric_alarm.alb_unhealthy_targets.alarm_name]
-    enable      = true
-    rollback    = true
+    alarm_names = [
+      aws_cloudwatch_metric_alarm.alb_unhealthy_targets.alarm_name,
+      aws_cloudwatch_metric_alarm.alb_target_5xx.alarm_name,
+    ]
+    enable   = true
+    rollback = true
   }
 
   deployment_circuit_breaker {
