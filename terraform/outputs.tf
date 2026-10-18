@@ -66,3 +66,8 @@ output "jenkins_url" {
 output "jenkins_instance_id" {
   value = aws_instance.jenkins.id
 }
+
+output "alerts_topic_arn" {
+  description = "SNS topic that receives CloudWatch alarm notifications"
+  value       = aws_sns_topic.delivery_alerts.arn
+}

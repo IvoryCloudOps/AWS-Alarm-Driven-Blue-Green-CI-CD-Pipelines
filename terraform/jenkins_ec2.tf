@@ -80,6 +80,12 @@ resource "aws_instance" "jenkins" {
     systemctl enable --now jenkins
   EOF
 
+  # Jenkins state lives on the root volume, so a newer AL2023 AMI must not replace the
+  # instance. A stopped instance also reports no public IP, which would force replacement.
+  lifecycle {
+    ignore_changes = [ami, associate_public_ip_address]
+  }
+
   tags = {
     Name      = "blue-green-jenkins"
     Project   = "AWS Blue Green Container Delivery Platform"

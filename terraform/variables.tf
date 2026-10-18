@@ -21,3 +21,14 @@ variable "jenkins_instance_type" {
   type        = string
   default     = "t3.medium"
 }
+
+variable "alert_email" {
+  description = "Email address subscribed to the delivery alerts SNS topic"
+  type        = string
+}
+
+variable "alb_5xx_alarm_threshold" {
+  description = "Target 5XX responses within one minute that trigger the 5XX alarm"
+  type        = number
+  default     = 1
+}

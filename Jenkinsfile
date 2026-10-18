@@ -1,6 +1,23 @@
 // Requirements on the Jenkins agent: git, python3 (+venv), docker, aws cli v2, jq, trivy, curl.
 // AWS access: attach an IAM instance/task role to the agent, or wrap stages with
 // withCredentials([...]) / the AWS Credentials plugin.
+
+// Publishes to the alerts SNS topic. A notification failure is logged but never changes
+// the build result.
+def notifySns(String subject, String message) {
+    withEnv(["NOTIFY_SUBJECT=${subject.take(100)}", "NOTIFY_MESSAGE=${message}"]) {
+        sh '''
+            if ! ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text) \
+                || ! aws sns publish \
+                    --topic-arn "arn:aws:sns:$AWS_REGION:$ACCOUNT_ID:$SNS_TOPIC_NAME" \
+                    --subject "$NOTIFY_SUBJECT" \
+                    --message "$NOTIFY_MESSAGE" >/dev/null; then
+                echo "WARNING: failed to publish SNS notification"
+            fi
+        '''
+    }
+}
+
 pipeline {
     agent any
 
@@ -20,6 +37,7 @@ pipeline {
         TASK_FAMILY       = 'ivorycloud-delivery'
         ALB_NAME          = 'blue-green-delivery-alb'
         BAKE_TIMEOUT_MIN  = '15'
+        SNS_TOPIC_NAME    = 'blue-green-delivery-alerts'
     }
 
     stages {
@@ -192,12 +210,22 @@ EOF
     post {
         success {
             echo "Deployed ${env.IMAGE_URI} (${env.NEW_TASK_DEF}) successfully."
-            // Add Slack / SNS / email notification here.
+            notifySns(
+                "SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                """Deployment succeeded.
+
+Job:             ${env.JOB_NAME} #${env.BUILD_NUMBER}
+Build URL:       ${env.BUILD_URL ?: 'n/a'}
+Image:           ${env.IMAGE_URI}
+Task definition: ${env.NEW_TASK_DEF}
+Previous:        ${env.PREVIOUS_TASK_DEF}"""
+            )
         }
 
         failure {
             script {
                 echo "Pipeline failed."
+                def rollback = 'not needed (failed before deploy)'
                 if (env.DEPLOY_STARTED == 'true' && env.PREVIOUS_TASK_DEF) {
                     echo "Rolling back to ${env.PREVIOUS_TASK_DEF}"
                     sh '''
@@ -206,8 +234,17 @@ EOF
                             --service "$ECS_SERVICE" \
                             --task-definition "$PREVIOUS_TASK_DEF" >/dev/null
                     '''
+                    rollback = "rolled back to ${env.PREVIOUS_TASK_DEF}"
                 }
-                // Add Slack / SNS / email notification here.
+                notifySns(
+                    "FAILURE: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                    """Pipeline failed.
+
+Job:       ${env.JOB_NAME} #${env.BUILD_NUMBER}
+Build URL: ${env.BUILD_URL ?: 'n/a'}
+Commit:    ${env.IMAGE_TAG ?: 'n/a'}
+Rollback:  ${rollback}"""
+                )
             }
         }
 

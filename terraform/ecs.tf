@@ -1,6 +1,12 @@
 resource "aws_ecs_cluster" "delivery_cluster" {
   name = "blue-green-delivery-cluster"
 
+  # Publishes RunningTaskCount and other service metrics used by the ECS alarm.
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
+
   tags = {
     Project   = "AWS Blue Green Container Delivery Platform"
     ManagedBy = "Terraform"

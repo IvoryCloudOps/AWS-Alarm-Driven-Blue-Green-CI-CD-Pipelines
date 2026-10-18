@@ -50,6 +50,12 @@ resource "aws_iam_policy" "jenkins_deploy" {
         Effect   = "Allow"
         Action   = "iam:PassRole"
         Resource = aws_iam_role.ecs_execution_role.arn
+      },
+      {
+        Sid      = "PublishPipelineNotifications"
+        Effect   = "Allow"
+        Action   = "sns:Publish"
+        Resource = aws_sns_topic.delivery_alerts.arn
       }
     ]
   })
