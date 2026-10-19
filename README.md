@@ -138,7 +138,34 @@ Infrastructure pipeline drills:
 | Invalid Terraform blocked at validate on a PR and on `main` | [PR #5](https://github.com/IvoryCloudOps/aws-blue-green-delivery-platform/pull/5) · [run 39200829591](https://github.com/IvoryCloudOps/aws-blue-green-delivery-platform/actions/runs/39200829591) |
 | Remote state | `s3://blue-green-delivery-tfstate-075723833258/blue-green-delivery/terraform.tfstate`, a new object version per apply |
 
-GitHub keeps workflow logs for 90 days and plan artifacts for 30, so screenshots of the PR plan comment, the approval screen, and the S3 versions are the durable record.
+GitHub keeps workflow logs for 90 days and plan artifacts for 30, so the screenshots below are the durable record.
+
+<details>
+<summary><b>Screenshots</b></summary>
+
+**Infrastructure pipeline**
+
+| | |
+|---|---|
+| Pull request plan comment | ![PR plan comment](docs/screenshots/01-pr-plan-comment.png) |
+| Pull request checks | ![PR checks](docs/screenshots/02-pr-checks.png) |
+| Checkov and plan summary | ![Checkov and plan summary](docs/screenshots/03-checkov-and-plan-summary.png) |
+| Production approval and apply | ![Approval and apply](docs/screenshots/04-approval-and-apply.png) |
+| Apply annotations and plan artifact | ![Apply annotations](docs/screenshots/05-apply-annotations.png) |
+| `production` environment protection | ![Production environment](docs/screenshots/06-production-environment.png) |
+| S3 remote state versions | ![S3 state versions](docs/screenshots/07-s3-state-versions.png) |
+| Change applied in AWS (SNS tags) | ![SNS tags](docs/screenshots/08-aws-change-sns-tags.png) |
+| Invalid Terraform blocked before plan and apply | ![Failure blocked](docs/screenshots/09-failure-blocked.png) |
+
+**Application pipeline and monitoring**
+
+| | |
+|---|---|
+| Successful Jenkins deployment | ![Jenkins build](docs/screenshots/10-jenkins-build.png) |
+| Rollback notification from the `http-errors` drill | ![Rollback email](docs/screenshots/11-rollback-email.png) |
+| CloudWatch alarms | ![CloudWatch alarms](docs/screenshots/12-cloudwatch-alarms.png) |
+
+</details>
 
 ---
 
