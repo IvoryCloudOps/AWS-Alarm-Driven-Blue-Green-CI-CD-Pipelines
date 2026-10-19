@@ -101,12 +101,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Reports which inputs are missing or malformed without printing their values.
+      # Trims surrounding whitespace (a common copy-paste artifact), then reports which
+      # inputs are missing or malformed without printing their values.
       - name: Check required secrets
         run: |
           bad=0
           for name in TF_VAR_alert_email TF_VAR_jenkins_allowed_cidr; do
             value="${!name}"
+            value="${value#"${value%%[![:space:]]*}"}"
+            value="${value%"${value##*[![:space:]]}"}"
+            if [ -n "$value" ] && [ "$value" != "${!name}" ]; then
+              echo "::add-mask::${value}"
+              echo "${name}=${value}" >> "$GITHUB_ENV"
+              echo "${name}: trimmed surrounding whitespace"
+            fi
             problems=()
             [ -z "$value" ] && problems+=("empty")
             [[ "$value" =~ [[:space:]] ]] && problems+=("contains whitespace or a newline")
