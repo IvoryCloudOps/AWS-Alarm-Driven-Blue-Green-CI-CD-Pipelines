@@ -101,6 +101,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Reports which inputs are missing without printing their values.
+      - name: Check required secrets
+        run: |
+          missing=0
+          for name in TF_VAR_alert_email TF_VAR_jenkins_allowed_cidr; do
+            if [ -z "${!name}" ]; then
+              echo "::error::${name} is empty. Add repository secret ${name^^} under Settings > Secrets and variables > Actions > Secrets."
+              missing=1
+            else
+              echo "${name}: set"
+            fi
+          done
+          exit $missing
+
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
         with:
