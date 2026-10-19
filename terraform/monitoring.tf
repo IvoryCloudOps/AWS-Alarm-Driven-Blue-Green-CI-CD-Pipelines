@@ -4,6 +4,7 @@ resource "aws_sns_topic" "delivery_alerts" {
   tags = {
     Project   = "AWS Blue Green Container Delivery Platform"
     ManagedBy = "Terraform"
+    Component = "alerting"
   }
 }
 
