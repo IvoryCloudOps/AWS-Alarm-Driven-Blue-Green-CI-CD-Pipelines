@@ -20,6 +20,7 @@ resource "aws_cloudwatch_log_group" "application_logs" {
   tags = {
     Project   = "AWS Blue Green Container Delivery Platform"
     ManagedBy = "Terraform"
+    Component = "application-logs"
   }
 }
 
