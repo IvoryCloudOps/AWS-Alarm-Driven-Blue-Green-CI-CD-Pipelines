@@ -185,6 +185,9 @@ data "aws_iam_policy_document" "terraform_read" {
       "iam:GetPolicyVersion",
       "iam:ListPolicyVersions",
       "iam:GetInstanceProfile",
+      "iam:ListRoleTags",
+      "iam:ListPolicyTags",
+      "iam:ListInstanceProfileTags",
     ]
     resources = ["*"]
   }
@@ -222,7 +225,8 @@ data "aws_iam_policy_document" "terraform_write" {
       "ec2:UpdateSecurityGroupRuleDescriptionsIngress", "ec2:UpdateSecurityGroupRuleDescriptionsEgress",
       "ec2:RunInstances", "ec2:TerminateInstances", "ec2:StartInstances", "ec2:StopInstances",
       "ec2:ModifyInstanceAttribute", "ec2:ModifyInstanceMetadataOptions",
-      "ec2:ModifyInstanceMaintenanceOptions", "ec2:ModifyVolume",
+      "ec2:ModifyInstanceMaintenanceOptions", "ec2:ModifyInstanceCreditSpecification",
+      "ec2:ModifyVolume",
       "ec2:AssociateIamInstanceProfile", "ec2:DisassociateIamInstanceProfile",
       "ec2:ReplaceIamInstanceProfileAssociation",
       "ec2:CreateTags", "ec2:DeleteTags",
@@ -308,10 +312,23 @@ data "aws_iam_policy_document" "terraform_write" {
     effect = "Allow"
     actions = [
       "sns:CreateTopic", "sns:DeleteTopic", "sns:SetTopicAttributes",
-      "sns:Subscribe", "sns:Unsubscribe", "sns:SetSubscriptionAttributes",
-      "sns:TagResource", "sns:UntagResource",
+      "sns:Subscribe", "sns:TagResource", "sns:UntagResource",
     ]
-    resources = ["arn:aws:sns:${var.aws_region}:${local.account_id}:blue-green-delivery-alerts*"]
+    resources = ["arn:aws:sns:${var.aws_region}:${local.account_id}:blue-green-delivery-alerts"]
+  }
+
+  # Subscription actions do not support resource ARNs in IAM, so they need "*".
+  statement {
+    sid       = "ManageAlertSubscriptions"
+    effect    = "Allow"
+    actions   = ["sns:Unsubscribe", "sns:SetSubscriptionAttributes"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.aws_region]
+    }
   }
 
   statement {
