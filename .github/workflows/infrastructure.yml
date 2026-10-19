@@ -1,0 +1,374 @@
+# Infrastructure CI/CD for the Terraform in terraform/. Application code is delivered
+# separately by Jenkins, and changes outside terraform/ never trigger this workflow.
+#
+#   Pull request:  checks (fmt, validate, lint, Checkov) -> plan (read-only role, PR comment)
+#   Push to main:  checks -> plan -> apply (apply role, production environment approval)
+#
+# The apply job only runs on main, only when the plan changes resources, only when the
+# TF_APPLY_ENABLED repository variable is "true", and only after a reviewer approves the
+# production environment. The apply role's IAM trust also accepts nothing but that
+# environment, so no other branch or workflow can obtain apply credentials.
+name: Infrastructure
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/infrastructure.yml"
+      - ".github/actions/terraform-setup/**"
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/infrastructure.yml"
+      - ".github/actions/terraform-setup/**"
+
+permissions:
+  contents: read
+
+# One run per pull request (newer pushes cancel older plans). Runs on main queue instead
+# of cancelling, so an apply is never interrupted.
+concurrency:
+  group: infrastructure-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  TF_VERSION: "1.15.8"
+  AWS_REGION: us-east-2
+  TF_IN_AUTOMATION: "true"
+  TF_PLAN_ROLE: arn:aws:iam::075723833258:role/GitHubActions-Terraform-Plan
+  TF_APPLY_ROLE: arn:aws:iam::075723833258:role/GitHubActions-Terraform-Apply
+
+jobs:
+  checks:
+    name: Format, validate, lint, Checkov
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive -diff terraform
+
+      # -backend=false validates without touching state or needing AWS credentials.
+      - name: Validate main configuration
+        working-directory: terraform
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+      - name: Validate bootstrap configuration
+        working-directory: terraform/bootstrap
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+      - name: Set up TFLint
+        uses: terraform-linters/setup-tflint@v4
+
+      - name: Lint
+        run: |
+          tflint --init
+          tflint --chdir=terraform
+          tflint --chdir=terraform/bootstrap
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Report-only for now: findings appear as annotations and in the job summary but do
+      # not fail the build. To start enforcing specific checks, add their IDs to
+      # CHECKOV_HARD_FAIL_ON, e.g. "CKV_AWS_23,CKV_AWS_260".
+      - name: Checkov
+        env:
+          CHECKOV_HARD_FAIL_ON: ""
+        run: |
+          pip install --quiet "checkov>=3,<4"
+          checkov --version
+          args=(-d terraform --framework terraform --quiet --compact
+                -o cli -o json --output-file-path console,checkov-out --soft-fail)
+          [ -n "$CHECKOV_HARD_FAIL_ON" ] && args+=(--hard-fail-on "$CHECKOV_HARD_FAIL_ON")
+          set +e
+          checkov "${args[@]}"
+          code=$?
+          set -e
+          python3 - <<'EOF'
+          import json, os
+          data = json.load(open("checkov-out/results_json.json"))
+          reports = data if isinstance(data, list) else [data]
+          passed = sum(r["summary"]["passed"] for r in reports)
+          failed = sum(r["summary"]["failed"] for r in reports)
+          skipped = sum(r["summary"]["skipped"] for r in reports)
+          findings = sorted({f"{c['check_id']} {c['resource']}"
+                             for r in reports for c in r["results"]["failed_checks"]})
+          print(f"::notice title=Checkov::{passed} passed, {failed} failed, {skipped} skipped")
+          if findings:
+              listing = "; ".join(findings)
+              print(f"::warning title=Checkov findings ({failed})::{listing[:3500]}")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+              s.write(f"### Checkov\n\n| Passed | Failed | Skipped |\n|---|---|---|\n"
+                      f"| {passed} | {failed} | {skipped} |\n\n")
+              if findings:
+                  s.write("<details><summary>Failed checks</summary>\n\n")
+                  s.write("\n".join(f"- `{f}`" for f in findings))
+                  s.write("\n\n</details>\n")
+          EOF
+          exit $code
+
+  plan:
+    name: Plan
+    needs: checks
+    runs-on: ubuntu-latest
+    # Fork pull requests get no OIDC token or secrets, so they cannot plan.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+
+    env:
+      TF_VAR_alert_email: ${{ secrets.TF_VAR_ALERT_EMAIL }}
+      TF_VAR_jenkins_allowed_cidr: ${{ secrets.TF_VAR_JENKINS_ALLOWED_CIDR }}
+
+    outputs:
+      resource_changes: ${{ steps.summary.outputs.resource_changes }}
+      digest: ${{ steps.summary.outputs.digest }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Terraform setup (read-only plan role)
+        uses: ./.github/actions/terraform-setup
+        with:
+          role-to-assume: ${{ env.TF_PLAN_ROLE }}
+          role-session-name: terraform-plan-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'main' }}
+          terraform-version: ${{ env.TF_VERSION }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # -detailed-exitcode: 0 = no changes, 1 = error, 2 = changes present.
+      - name: Terraform plan
+        id: plan
+        working-directory: terraform
+        run: |
+          set +e
+          terraform plan -input=false -lock-timeout=5m -no-color -detailed-exitcode -out=tfplan > plan.log 2>&1
+          code=$?
+          set -e
+          cat plan.log
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          [ "$code" -ne 1 ]
+
+      # The binary plan and its JSON form contain sensitive values in plain text, so they
+      # never leave the runner. Only the redacted text plan is published.
+      - name: Summarize plan
+        id: summary
+        working-directory: terraform
+        run: |
+          terraform show -json tfplan > plan.json
+          jq -r '
+            [.resource_changes[]? | .change.actions] as $a
+            | "create=\([$a[] | select(. == ["create"])] | length)",
+              "update=\([$a[] | select(. == ["update"])] | length)",
+              "replace=\([$a[] | select(index("delete") and index("create"))] | length)",
+              "delete=\([$a[] | select(. == ["delete"])] | length)",
+              "resource_changes=\([$a[] | select(index("no-op") == null and index("read") == null)] | length)"
+          ' plan.json >> "$GITHUB_OUTPUT"
+
+          # Fingerprint of what will change (addresses and actions only), so the apply job
+          # can confirm it is applying the plan that was reviewed.
+          digest=$(jq -c '[.resource_changes[]? | select((.change.actions | index("no-op")) == null and (.change.actions | index("read")) == null) | {address, actions: .change.actions}] | sort_by(.address)' plan.json | sha256sum | cut -d' ' -f1)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+          jq -r '.resource_changes[]? | select(.change.actions | index("delete")) | "- `\(.address)` (\(.change.actions | join(" then ")))"' plan.json > destroys.md
+
+          grep -vE 'Refreshing state|Reading\.\.\.|Read complete after' plan.log > plan.txt || true
+          headline=$(grep -E '^(Plan:|No changes\.|Changes to Outputs:)' plan.txt | head -1)
+          headline=${headline:-No changes.}
+          echo "headline=$headline" >> "$GITHUB_OUTPUT"
+          rm -f plan.json
+
+          {
+            echo "### Terraform plan"
+            echo
+            echo "**${headline}**"
+            echo
+            echo '<details><summary>Plan output</summary>'
+            echo
+            echo '```'
+            head -c 60000 plan.txt
+            echo '```'
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=Terraform plan::${headline}"
+
+      - name: Upload plan output
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ github.run_id }}
+          path: terraform/plan.txt
+          retention-days: 30
+
+      - name: Comment plan on pull request
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          EXITCODE: ${{ steps.plan.outputs.exitcode }}
+          HEADLINE: ${{ steps.summary.outputs.headline }}
+          CREATE: ${{ steps.summary.outputs.create }}
+          UPDATE: ${{ steps.summary.outputs.update }}
+          REPLACE: ${{ steps.summary.outputs.replace }}
+          DELETE: ${{ steps.summary.outputs.delete }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- terraform-plan -->';
+            const e = process.env;
+            const limit = 60000;
+
+            let plan = fs.readFileSync('terraform/plan.txt', 'utf8');
+            if (plan.length > limit) {
+              plan = plan.slice(0, limit) + '\n\n... truncated; see the workflow run for the full plan.';
+            }
+            const destroys = fs.readFileSync('terraform/destroys.md', 'utf8').trim();
+
+            const body = [
+              marker,
+              `### Terraform plan: ${e.HEADLINE}`,
+              '',
+              '| Create | Update | Replace | Delete |',
+              '|---|---|---|---|',
+              `| ${e.CREATE} | ${e.UPDATE} | ${e.REPLACE} | ${e.DELETE} |`,
+              '',
+              destroys ? `**Resources that would be deleted or replaced:**\n${destroys}\n` : '',
+              '<details><summary>Plan output</summary>',
+              '',
+              '```',
+              plan,
+              '```',
+              '</details>',
+              '',
+              `Commit \`${context.payload.pull_request.head.sha.slice(0, 7)}\` · [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              ...context.repo, issue_number: context.issue.number, per_page: 100,
+            });
+            const existing = comments.find(c => c.user.type === 'Bot' && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+            }
+
+      - name: Block unapproved deletes and replacements
+        if: github.event_name == 'pull_request' && (steps.summary.outputs.replace != '0' || steps.summary.outputs.delete != '0')
+        env:
+          ALLOW_DESTROY: ${{ contains(github.event.pull_request.labels.*.name, 'allow-destroy') }}
+        working-directory: terraform
+        run: |
+          echo "This plan deletes or replaces resources:"
+          cat destroys.md
+          if [ "$ALLOW_DESTROY" = "true" ]; then
+            echo "Allowed by the allow-destroy label."
+          else
+            echo "::error::Plan deletes or replaces resources. Review them, then add the allow-destroy label to proceed."
+            exit 1
+          fi
+
+      - name: Flag deletes for the apply reviewer
+        if: github.event_name == 'push' && (steps.summary.outputs.replace != '0' || steps.summary.outputs.delete != '0')
+        working-directory: terraform
+        run: |
+          echo "::warning title=Deletes or replacements::This apply will delete or replace resources. Review them before approving production."
+          cat destroys.md
+
+      - name: Report apply status
+        if: github.event_name == 'push'
+        env:
+          CHANGES: ${{ steps.summary.outputs.resource_changes }}
+          APPLY_ENABLED: ${{ vars.TF_APPLY_ENABLED }}
+        run: |
+          if [ "$CHANGES" = "0" ]; then
+            echo "::notice title=Apply::No resource changes, so nothing to apply."
+          elif [ "$APPLY_ENABLED" != "true" ]; then
+            echo "::warning title=Apply disabled::Set the TF_APPLY_ENABLED repository variable to true once the production environment requires approval."
+          else
+            echo "::notice title=Apply::${CHANGES} resource change(s) waiting for production approval."
+          fi
+
+  apply:
+    name: Apply
+    needs: plan
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.plan.outputs.resource_changes != '0' &&
+      vars.TF_APPLY_ENABLED == 'true'
+
+    # Required reviewers on this environment provide the manual approval gate, and the
+    # apply role's IAM trust only accepts tokens from jobs in this environment.
+    environment: production
+
+    concurrency:
+      group: terraform-apply
+      cancel-in-progress: false
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      TF_VAR_alert_email: ${{ secrets.TF_VAR_ALERT_EMAIL }}
+      TF_VAR_jenkins_allowed_cidr: ${{ secrets.TF_VAR_JENKINS_ALLOWED_CIDR }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Terraform setup (apply role)
+        uses: ./.github/actions/terraform-setup
+        with:
+          role-to-assume: ${{ env.TF_APPLY_ROLE }}
+          role-session-name: terraform-apply-${{ github.run_id }}
+          terraform-version: ${{ env.TF_VERSION }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Re-plan with the apply role and refuse to continue if the changes differ from the
+      # plan the reviewer approved (for example, if someone changed AWS in between).
+      - name: Re-plan and compare with reviewed plan
+        working-directory: terraform
+        env:
+          REVIEWED_DIGEST: ${{ needs.plan.outputs.digest }}
+        run: |
+          terraform plan -input=false -lock-timeout=5m -no-color -out=tfplan
+          digest=$(terraform show -json tfplan | jq -c '[.resource_changes[]? | select((.change.actions | index("no-op")) == null and (.change.actions | index("read")) == null) | {address, actions: .change.actions}] | sort_by(.address)' | sha256sum | cut -d' ' -f1)
+          if [ "$digest" != "$REVIEWED_DIGEST" ]; then
+            echo "::error::The changes no longer match the reviewed plan. Re-run the workflow to plan and review again."
+            exit 1
+          fi
+          echo "Plan matches the reviewed plan."
+
+      - name: Terraform apply
+        working-directory: terraform
+        run: |
+          terraform apply -input=false -lock-timeout=5m -no-color tfplan | tee apply.log
+          result=$(grep -E '^Apply complete!' apply.log | tail -1)
+          echo "::notice title=Terraform apply::${result}"
+          {
+            echo "### Terraform apply"
+            echo
+            echo "**${result}**"
+          } >> "$GITHUB_STEP_SUMMARY"
