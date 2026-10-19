@@ -82,8 +82,10 @@ resource "aws_instance" "jenkins" {
 
   # Jenkins state lives on the root volume, so a newer AL2023 AMI must not replace the
   # instance. A stopped instance also reports no public IP, which would force replacement.
+  # user_data only runs on first boot; changing it would stop and restart Jenkins for no
+  # effect. It also differs only in line endings between Windows and Linux checkouts.
   lifecycle {
-    ignore_changes = [ami, associate_public_ip_address]
+    ignore_changes = [ami, associate_public_ip_address, user_data]
   }
 
   tags = {
