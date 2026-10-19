@@ -16,6 +16,21 @@ variable "github_repository" {
   default     = "IvoryCloudOps/aws-blue-green-delivery-platform"
 }
 
+# This repository's OIDC subject claims include the owner and repository IDs
+# (repo:OWNER@OWNER_ID/REPO@REPO_ID:...). IDs never change, so a renamed or recreated
+# repository with the same name cannot match these trust policies.
+variable "github_owner_id" {
+  description = "Numeric ID of the GitHub repository owner"
+  type        = string
+  default     = "59988863"
+}
+
+variable "github_repository_id" {
+  description = "Numeric ID of the GitHub repository"
+  type        = string
+  default     = "1379092293"
+}
+
 variable "github_apply_environment" {
   description = "GitHub Actions environment whose jobs may assume the apply role"
   type        = string
@@ -26,6 +41,11 @@ locals {
   account_id  = data.aws_caller_identity.current.account_id
   state_key   = "blue-green-delivery/terraform.tfstate"
   project_tag = "AWS Blue Green Container Delivery Platform"
+
+  # e.g. repo:IvoryCloudOps@59988863/aws-blue-green-delivery-platform@1379092293
+  github_owner  = split("/", var.github_repository)[0]
+  github_repo   = split("/", var.github_repository)[1]
+  oidc_sub_base = "repo:${local.github_owner}@${var.github_owner_id}/${local.github_repo}@${var.github_repository_id}"
 
   # The roles, policy, and instance profile the main configuration manages.
   managed_role_arns = [
@@ -73,8 +93,8 @@ data "aws_iam_policy_document" "plan_trust" {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
       values = [
-        "repo:${var.github_repository}:pull_request",
-        "repo:${var.github_repository}:ref:refs/heads/main",
+        "${local.oidc_sub_base}:pull_request",
+        "${local.oidc_sub_base}:ref:refs/heads/main",
       ]
     }
   }
@@ -100,7 +120,7 @@ data "aws_iam_policy_document" "apply_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository}:environment:${var.github_apply_environment}"]
+      values   = ["${local.oidc_sub_base}:environment:${var.github_apply_environment}"]
     }
   }
 }

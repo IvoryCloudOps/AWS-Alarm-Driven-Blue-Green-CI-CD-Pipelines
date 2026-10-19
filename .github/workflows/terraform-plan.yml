@@ -1,0 +1,240 @@
+# Infrastructure CI: runs on pull requests that change Terraform. Checks formatting,
+# validates and lints both configurations, scans for misconfigurations, then runs a
+# read-only plan against the live state and posts it on the pull request. Plans that
+# delete or replace resources fail unless the pull request has the allow-destroy label.
+#
+# Nothing here applies changes. The apply workflow runs separately, on main, behind the
+# protected production environment.
+name: Terraform Plan
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform-plan.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-plan-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  TF_VERSION: "1.15.8"
+  AWS_REGION: us-east-2
+  TF_IN_AUTOMATION: "true"
+  TF_PLAN_ROLE: arn:aws:iam::075723833258:role/GitHubActions-Terraform-Plan
+
+jobs:
+  static-checks:
+    name: Format, validate, lint, scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive -diff terraform
+
+      # -backend=false validates without touching state or needing AWS credentials.
+      - name: Validate main configuration
+        working-directory: terraform
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+      - name: Validate bootstrap configuration
+        working-directory: terraform/bootstrap
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+      - name: Set up TFLint
+        uses: terraform-linters/setup-tflint@v4
+
+      - name: Lint
+        run: |
+          tflint --init
+          tflint --chdir=terraform
+          tflint --chdir=terraform/bootstrap
+
+      # Report-only until the existing findings are triaged; set exit-code to 1 to block.
+      - name: Scan for misconfigurations
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: terraform
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+
+  plan:
+    name: Plan
+    needs: static-checks
+    runs-on: ubuntu-latest
+    # Fork pull requests get no OIDC token or secrets, so they cannot plan.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+
+    defaults:
+      run:
+        working-directory: terraform
+
+    env:
+      TF_VAR_alert_email: ${{ secrets.TF_VAR_ALERT_EMAIL }}
+      TF_VAR_jenkins_allowed_cidr: ${{ secrets.TF_VAR_JENKINS_ALLOWED_CIDR }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Trims surrounding whitespace (a common copy-paste artifact), then reports which
+      # inputs are missing or malformed without printing their values.
+      - name: Check required secrets
+        run: |
+          bad=0
+          for name in TF_VAR_alert_email TF_VAR_jenkins_allowed_cidr; do
+            value="${!name}"
+            value="${value#"${value%%[![:space:]]*}"}"
+            value="${value%"${value##*[![:space:]]}"}"
+            if [ -n "$value" ] && [ "$value" != "${!name}" ]; then
+              echo "::add-mask::${value}"
+              echo "${name}=${value}" >> "$GITHUB_ENV"
+              echo "${name}: trimmed surrounding whitespace"
+            fi
+            problems=()
+            [ -z "$value" ] && problems+=("empty")
+            [[ "$value" =~ [[:space:]] ]] && problems+=("contains whitespace or a newline")
+            [[ "$value" == *\"* || "$value" == *\'* ]] && problems+=("contains quotes")
+            [[ "$value" == *=* ]] && problems+=("contains '=' (paste only the value, not the tfvars line)")
+            if [ ${#problems[@]} -gt 0 ]; then
+              msg=$(IFS=';'; echo "${problems[*]}")
+              echo "::error::Secret ${name^^} is invalid: ${msg//;/, }. Re-enter it under Settings > Secrets and variables > Actions > Secrets."
+              bad=1
+            else
+              echo "${name}: set"
+            fi
+          done
+          exit $bad
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials (read-only plan role)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.TF_PLAN_ROLE }}
+          role-session-name: terraform-plan-pr-${{ github.event.pull_request.number }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        run: terraform init -input=false -lock-timeout=5m
+
+      # -detailed-exitcode: 0 = no changes, 1 = error, 2 = changes present.
+      - name: Terraform plan
+        id: plan
+        run: |
+          set +e
+          terraform plan -input=false -lock-timeout=5m -no-color -detailed-exitcode -out=tfplan > plan.log 2>&1
+          code=$?
+          set -e
+          cat plan.log
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          [ "$code" -ne 1 ]
+
+      - name: Summarize plan
+        id: summary
+        run: |
+          terraform show -json tfplan > plan.json
+          jq -r '
+            [.resource_changes[]? | .change.actions] as $a
+            | "create=\([$a[] | select(. == ["create"])] | length)",
+              "update=\([$a[] | select(. == ["update"])] | length)",
+              "replace=\([$a[] | select(index("delete") and index("create"))] | length)",
+              "delete=\([$a[] | select(. == ["delete"])] | length)"
+          ' plan.json >> "$GITHUB_OUTPUT"
+          jq -r '.resource_changes[]? | select(.change.actions | index("delete")) | "- `\(.address)` (\(.change.actions | join(" then ")))"' plan.json > destroys.md
+
+          # Drop refresh noise so the comment shows only what would change.
+          grep -vE 'Refreshing state|Reading\.\.\.|Read complete after' plan.log > plan-trimmed.log || true
+
+      - name: Comment plan on pull request
+        uses: actions/github-script@v7
+        env:
+          EXITCODE: ${{ steps.plan.outputs.exitcode }}
+          CREATE: ${{ steps.summary.outputs.create }}
+          UPDATE: ${{ steps.summary.outputs.update }}
+          REPLACE: ${{ steps.summary.outputs.replace }}
+          DELETE: ${{ steps.summary.outputs.delete }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- terraform-plan -->';
+            const e = process.env;
+            const limit = 60000;
+
+            let plan = fs.readFileSync('terraform/plan-trimmed.log', 'utf8');
+            if (plan.length > limit) {
+              plan = plan.slice(0, limit) + '\n\n... truncated; see the workflow log for the full plan.';
+            }
+            const destroys = fs.readFileSync('terraform/destroys.md', 'utf8').trim();
+            const status = e.EXITCODE === '0' ? 'No changes' : 'Changes present';
+
+            const body = [
+              marker,
+              `### Terraform plan: ${status}`,
+              '',
+              '| Create | Update | Replace | Delete |',
+              '|---|---|---|---|',
+              `| ${e.CREATE} | ${e.UPDATE} | ${e.REPLACE} | ${e.DELETE} |`,
+              '',
+              destroys ? `**Resources that would be deleted or replaced:**\n${destroys}\n` : '',
+              '<details><summary>Plan output</summary>',
+              '',
+              '```',
+              plan,
+              '```',
+              '</details>',
+              '',
+              `Commit \`${context.payload.pull_request.head.sha.slice(0, 7)}\` · [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              ...context.repo, issue_number: context.issue.number, per_page: 100,
+            });
+            const existing = comments.find(c => c.user.type === 'Bot' && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+            }
+
+      - name: Block unapproved deletes and replacements
+        if: steps.summary.outputs.replace != '0' || steps.summary.outputs.delete != '0'
+        env:
+          ALLOW_DESTROY: ${{ contains(github.event.pull_request.labels.*.name, 'allow-destroy') }}
+        run: |
+          echo "This plan deletes or replaces resources:"
+          cat destroys.md
+          if [ "$ALLOW_DESTROY" = "true" ]; then
+            echo "Allowed by the allow-destroy label."
+          else
+            echo "::error::Plan deletes or replaces resources. Review them, then add the allow-destroy label to proceed."
+            exit 1
+          fi
