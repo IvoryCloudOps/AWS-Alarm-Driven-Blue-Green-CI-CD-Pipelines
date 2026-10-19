@@ -96,15 +96,16 @@ jobs:
           pip install --quiet "checkov>=3,<4"
           checkov --version
           args=(-d terraform --framework terraform --quiet --compact
-                -o cli -o json --output-file-path console,checkov-out --soft-fail)
+                -o cli -o json --output-file-path console,checkov.json --soft-fail)
           [ -n "$CHECKOV_HARD_FAIL_ON" ] && args+=(--hard-fail-on "$CHECKOV_HARD_FAIL_ON")
+          # The second output path is a file name: Checkov writes the JSON report there.
           set +e
           checkov "${args[@]}"
           code=$?
           set -e
           python3 - <<'EOF'
           import json, os
-          data = json.load(open("checkov-out/results_json.json"))
+          data = json.load(open("checkov.json"))
           reports = data if isinstance(data, list) else [data]
           passed = sum(r["summary"]["passed"] for r in reports)
           failed = sum(r["summary"]["failed"] for r in reports)
