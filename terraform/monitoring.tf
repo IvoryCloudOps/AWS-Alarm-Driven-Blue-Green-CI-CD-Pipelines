@@ -85,7 +85,7 @@ resource "aws_cloudwatch_metric_alarm" "alb_target_5xx" {
   period              = 60
   evaluation_periods  = 1
   comparison_operator = "GreaterThanOrEqualToThreshold"
-  threshold           = var.alb_5xx_alarm_threshold_typo
+  threshold           = var.alb_5xx_alarm_threshold
   treat_missing_data  = "notBreaching"
 
   dimensions = {
