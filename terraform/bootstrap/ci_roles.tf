@@ -1,14 +1,14 @@
 # IAM roles for the GitHub Actions infrastructure pipeline. They live in this bootstrap
 # configuration, which is applied locally by an administrator, so the pipeline can never
-# change its own permissions. The app deploy role (GitHubActions-BlueGreenDelivery) is
-# separate and untouched.
+# change its own permissions. Application deployments run from Jenkins, so no other
+# GitHub Actions role exists.
 #
 #   GitHubActions-Terraform-Plan  - read-only. Used by pull requests and by main.
 #   GitHubActions-Terraform-Apply - can change this project's resources. Only jobs that
 #                                   run in the protected "production" GitHub environment.
 #
-# Neither role name matches the IAM patterns the apply role may manage (blue-green-*,
-# GitHubActions-BlueGreenDelivery), so the apply role cannot modify itself or the plan role.
+# Neither role name matches the IAM pattern the apply role may manage (blue-green-*),
+# so the apply role cannot modify itself or the plan role.
 
 variable "github_repository" {
   description = "GitHub repository (owner/name) allowed to assume the Terraform CI roles"
@@ -50,7 +50,6 @@ locals {
   # The roles, policy, and instance profile the main configuration manages.
   managed_role_arns = [
     "arn:aws:iam::${local.account_id}:role/blue-green-*",
-    "arn:aws:iam::${local.account_id}:role/GitHubActions-BlueGreenDelivery",
   ]
 
   # The only managed policies the main configuration attaches to its roles.

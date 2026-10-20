@@ -46,9 +46,12 @@ flowchart LR
 ```
 
 ```text
-Application:     App code → Jenkins → ECR → ECS Blue/Green
-Infrastructure:  Terraform → GitHub Actions → Plan / Approval / Apply → AWS
+Application:     GitHub → Jenkins → validate → scan → ECR → ECS Blue/Green → monitor → rollback
+Infrastructure:  GitHub → GitHub Actions → Terraform plan / approval / apply → AWS
+Shared auth:     GitHub OIDC → Terraform plan and apply roles (Jenkins uses its EC2 instance profile)
 ```
+
+Jenkins is the only way application code reaches ECS. The project originally deployed the app with a GitHub Actions workflow; it was removed, along with its IAM role, so no second deployment path can bypass Jenkins' bake, rollback, and notification controls.
 
 ### Application delivery: Jenkins → ECR → ECS blue/green
 
