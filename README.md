@@ -15,7 +15,7 @@ Application releases needed repeatable validation, image scanning, and recovery 
 
 **Application CI/CD & ECS Blue/Green Deployment**
 
-![Alarm-Driven Blue/Green CI/CD Pipeline Architecture](https://miro.medium.com/v2/resize:fit:1100/format:webp/1*4lhJ-j05V8nXNKYH8uJLXw.png)
+![Alarm-Driven Blue/Green CI/CD Pipeline Architecture](https://miro.medium.com/v2/resize:fit:1100/format:webp/1*rQ9Gm97BmOiF_jGBFQYTIA.png)
 
 **Application delivery:** GitHub checkout → Jenkins on EC2 → Flask smoke tests → Docker build → Trivy scan → immutable Amazon ECR image → ECS/Fargate deployment.
 
@@ -23,7 +23,7 @@ An internet-facing ALB routes HTTP traffic through two blue/green target groups 
 
 ## GitHub Actions & Terraform Infrastructure CI/CD
 
-![AWS Cloud Architecture Diagram](https://miro.medium.com/v2/resize:fit:1100/format:webp/1*s8RKU_GRVtMOEwHhxUZ_6Q.png)
+![AWS Cloud Architecture Diagram](https://miro.medium.com/v2/resize:fit:1100/format:webp/1*IFRblhKPcN02ONW4MS1Xtg.png)
 
 **Infrastructure delivery:** Pull requests run Terraform formatting, validation, TFLint, **report-only Checkov**, and a read-only plan for review. Eligible pushes to main can run an apply only after detected changes, TF_APPLY_ENABLED=true, protected production approval, and a re-plan/change-action digest comparison. GitHub OIDC assumes distinct Plan and Apply roles; a separately bootstrapped, versioned S3 backend uses native lockfiles.
 
